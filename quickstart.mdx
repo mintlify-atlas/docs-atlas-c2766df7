@@ -1,47 +1,202 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Build Your First Custom Error Type with thiserror"
+sidebarTitle: "Quickstart"
+description: "Go from zero to a fully working custom Rust error type: install thiserror, derive Error on an enum, generate From and source impls, and use ? to propagate."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+thiserror turns the tedious work of implementing `std::error::Error` into a single derive attribute. This guide walks you through adding thiserror to a Rust project, defining a real-world enum error type, and using it with the `?` operator — from an empty `Cargo.toml` entry to a type that compiles, displays cleanly, and chains errors correctly.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Add thiserror to Cargo.toml">
+    Open your project's `Cargo.toml` and add thiserror under `[dependencies]`:
 
-    ```bash
-    npm install your-package
+    ```toml
+    [dependencies]
+    thiserror = "2"
+    ```
+
+    thiserror requires **Rust 1.77 or newer**. Run `rustup update stable` if your toolchain is older.
+
+    <Note>
+      The `std` feature is enabled by default. It lets you interpolate `std::path::Path` and `std::path::PathBuf` values directly in `#[error("...")]` message templates without calling `.display()`. To use thiserror in a `no_std` crate, opt out:
+
+      ```toml
+      [dependencies]
+      thiserror = { version = "2", default-features = false }
+      ```
+    </Note>
+  </Step>
+
+  <Step title="Import the Error derive macro">
+    In the file where you will define your error type, bring `thiserror::Error` into scope. You will also need `Debug` from the standard library — `#[derive(Error)]` requires `Debug` to be derived or implemented on the same type.
+
+    ```rust
+    use std::io;
+    use thiserror::Error;
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
 
-    ```bash
-    your-cli init
+  <Step title="Define your error enum">
+    Annotate your enum with `#[derive(Error, Debug)]` and add an `#[error("...")]` message to each variant. thiserror reads these annotations at compile time and generates the corresponding `Display` implementation.
+
+    ```rust
+    use std::io;
+    use thiserror::Error;
+
+    #[derive(Error, Debug)]
+    pub enum DataStoreError {
+        #[error("data store disconnected")]
+        Disconnect(#[from] io::Error),
+
+        #[error("the data for key `{0}` is not available")]
+        Redaction(String),
+
+        #[error("invalid header (expected {expected:?}, found {found:?})")]
+        InvalidHeader {
+            expected: String,
+            found: String,
+        },
+
+        #[error("unknown data store error")]
+        Unknown,
+    }
     ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
 
-    ```bash
-    your-cli start
+    Walk through each variant:
+
+    - **`Disconnect`** — wraps an `io::Error`. The `#[from]` attribute generates `impl From<io::Error> for DataStoreError` and also wires up `source()` so the original I/O error is accessible in the error chain.
+    - **`Redaction`** — a tuple variant whose message uses `{0}` to interpolate the first (and only) unnamed field.
+    - **`InvalidHeader`** — a struct variant whose message uses named fields with debug formatting (`{expected:?}`, `{found:?}`).
+    - **`Unknown`** — a unit variant with a static message and no fields.
+  </Step>
+
+  <Step title="Use your error type with ?">
+    Because `#[from] io::Error` generated a `From` impl, any function that returns `Result<T, DataStoreError>` can use `?` to propagate `io::Error` values automatically. thiserror handles the conversion.
+
+    ```rust
+    use std::fs;
+    use std::io;
+
+    fn read_data(path: &str) -> Result<String, DataStoreError> {
+        // io::Error is automatically converted to DataStoreError::Disconnect
+        // by the From impl that #[from] generated.
+        let contents = fs::read_to_string(path)?;
+        Ok(contents)
+    }
+
+    fn get_record(key: &str) -> Result<String, DataStoreError> {
+        if key == "secret" {
+            return Err(DataStoreError::Redaction(key.to_owned()));
+        }
+        read_data("data.db")
+    }
+    ```
+
+    Callers can match on the error to handle each case:
+
+    ```rust
+    fn main() {
+        match get_record("secret") {
+            Ok(data) => println!("Got: {data}"),
+            Err(DataStoreError::Disconnect(e)) => eprintln!("I/O error: {e}"),
+            Err(DataStoreError::Redaction(key)) => eprintln!("Redacted: {key}"),
+            Err(DataStoreError::InvalidHeader { expected, found }) => {
+                eprintln!("Bad header — wanted {expected}, got {found}");
+            }
+            Err(DataStoreError::Unknown) => eprintln!("Unknown failure"),
+        }
+    }
     ```
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## What thiserror generates
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+For the `DataStoreError` enum above, thiserror produces the following at compile time — no runtime overhead, no extra allocations, nothing in your public API that references thiserror itself:
+
+**`Display`** — derived from each `#[error("...")]` message:
+
+```rust
+// Equivalent to what thiserror generates:
+impl std::fmt::Display for DataStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DataStoreError::Disconnect(_) => write!(f, "data store disconnected"),
+            DataStoreError::Redaction(key) => {
+                write!(f, "the data for key `{}` is not available", key)
+            }
+            DataStoreError::InvalidHeader { expected, found } => {
+                write!(f, "invalid header (expected {:?}, found {:?})", expected, found)
+            }
+            DataStoreError::Unknown => write!(f, "unknown data store error"),
+        }
+    }
+}
+```
+
+**`From<io::Error>`** — derived from `#[from]`:
+
+```rust
+impl From<std::io::Error> for DataStoreError {
+    fn from(source: std::io::Error) -> Self {
+        DataStoreError::Disconnect(source)
+    }
+}
+```
+
+**`Error::source()`** — automatically wired because `#[from]` implies `#[source]`:
+
+```rust
+impl std::error::Error for DataStoreError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            DataStoreError::Disconnect(source) => Some(source),
+            _ => None,
+        }
+    }
+}
+```
+
+<Tip>
+  You never need to write both `#[from]` and `#[source]` on the same field. `#[from]` always implies `#[source]`, so adding both is redundant.
 </Tip>
+
+## Struct errors work too
+
+thiserror is not limited to enums. Named-field structs, tuple structs, and unit structs all support `#[derive(Error)]` with the same attributes:
+
+```rust
+use std::path::PathBuf;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("failed to read configuration from {path}")]
+pub struct ConfigError {
+    pub path: PathBuf,
+    #[source]
+    pub cause: std::io::Error,
+}
+```
+
+The `#[error("...")]` on a struct applies to the entire type. The `#[source]` attribute on the `cause` field tells thiserror to return that field from `Error::source()`.
+
+<Note>
+  With the `std` feature enabled (the default), you can write `{path}` directly in the message string even though `PathBuf` doesn't implement `Display` on its own. thiserror calls `.display()` internally. Without `std`, you would write `{}", path.display()` instead.
+</Note>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Attributes Reference" icon="tag" href="/attributes/error">
+    Deep dive into every attribute: message templates, field interpolation, transparent forwarding, and more.
+  </Card>
+  <Card title="Error Enum Patterns" icon="list-tree" href="/guides/error-enums">
+    Practical patterns for structuring library and application error enums.
+  </Card>
+  <Card title="Error Chaining" icon="link" href="/guides/error-chaining">
+    Learn how `#[source]`, `#[from]`, and `#[backtrace]` cooperate to build precise, navigable error chains.
+  </Card>
+  <Card title="thiserror vs anyhow" icon="scale-balanced" href="/guides/vs-anyhow">
+    When to use thiserror for structured errors and when anyhow's boxed type is the better fit.
+  </Card>
+</CardGroup>

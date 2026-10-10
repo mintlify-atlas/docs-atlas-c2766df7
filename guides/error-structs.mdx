@@ -1,0 +1,288 @@
+---
+title: "Defining Struct Error Types with thiserror"
+sidebarTitle: "Struct Errors"
+description: "Learn how to define struct-based Rust error types with named fields, context data, source chaining, and opaque wrappers using thiserror."
+---
+
+Not every error needs an enum. When a failure mode is singular — one thing went wrong, in one way — a struct error type is cleaner and more direct. Struct errors are easier to construct, easier to destructure, and keep the error definition close to the operation that can fail. `thiserror` supports all three struct shapes: named-field structs, tuple structs, and unit structs.
+
+## When to use a struct vs an enum
+
+<CardGroup cols={2}>
+  <Card title="Use a struct when…" icon="square">
+    - The operation has exactly one failure mode
+    - You want to attach several pieces of context (path, line number, expected value, …)
+    - You are wrapping a single source error with extra information
+    - You want an opaque public error that hides internal representation
+  </Card>
+  <Card title="Use an enum when…" icon="list">
+    - The operation can fail in multiple distinct ways
+    - Callers need to `match` on the specific variant to decide what to do
+    - You are aggregating errors from different subsystems under one type
+  </Card>
+</CardGroup>
+
+## Named-field struct errors
+
+A named-field struct lets you attach rich context to the error. Every field can be interpolated into the `#[error("...")]` message by name, and one field can be designated as the `source()` of the error.
+
+```rust
+use std::path::PathBuf;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("failed to create configuration file {path}")]
+pub struct ConfigError {
+    pub path: PathBuf,
+    pub source: std::io::Error,
+}
+```
+
+Because the field is named `source`, `thiserror` automatically implements `Error::source()` for it — no extra attribute is needed. If you prefer a different field name, use `#[source]` explicitly:
+
+```rust
+use std::path::PathBuf;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("failed to write cache entry for key {key:?}")]
+pub struct CacheWriteError {
+    pub key: String,
+    pub path: PathBuf,
+    #[source]
+    pub io: std::io::Error,
+}
+```
+
+Here `io` is not named `source`, so `#[source]` is required to tell `thiserror` which field to expose through `Error::source()`.
+
+<Tip>
+  The `std` feature (enabled by default) lets you interpolate `Path` and `PathBuf` fields directly in format strings. Without `std`, use `path.display()` explicitly — see the [no_std guide](/guides/no-std) for details.
+</Tip>
+
+### Accessing context fields
+
+Struct errors give callers direct field access, which is often more ergonomic than pattern-matching an enum variant:
+
+```rust
+use std::path::PathBuf;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("failed to open {path}: {source}")]
+pub struct OpenError {
+    pub path: PathBuf,
+    pub source: std::io::Error,
+}
+
+fn describe(err: &OpenError) {
+    eprintln!("Could not open {}", err.path.display());
+    eprintln!("OS error code: {:?}", err.source.kind());
+}
+```
+
+## Tuple struct errors
+
+A single-field tuple struct is the lightest way to wrap another error type. The first field is referenced as `{0}` in the message.
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("json deserialization failed: {0}")]
+pub struct JsonError(pub serde_json::Error);
+```
+
+Use `#[from]` to get automatic `From` conversion and `source()` in one annotation:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("database error")]
+pub struct DbError(#[from] sqlx::Error);
+```
+
+With this definition, the `?` operator converts `sqlx::Error` into `DbError` automatically wherever `DbError` is the return type.
+
+<Note>
+  `#[from]` always implies `#[source]`, so `DbError(e).source()` returns `Some(&e)`. There is no need to add both attributes.
+</Note>
+
+### Multiple-field tuple struct
+
+Tuple structs may have more than one field; `{0}`, `{1}`, … reference them positionally:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("parse error at line {0}, column {1}: {2}")]
+pub struct ParseError(pub usize, pub usize, pub String);
+```
+
+## Unit struct errors
+
+A unit struct carries no data at all and communicates the error entirely through its static message. Use it for sentinel errors that are always unambiguous:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("operation timed out")]
+pub struct Timeout;
+
+#[derive(Error, Debug)]
+#[error("reached end of stream unexpectedly")]
+pub struct UnexpectedEof;
+```
+
+These are lightweight and can be embedded as variants inside a larger enum, or returned directly from functions that have exactly one error mode.
+
+## Combining `#[source]` with context fields
+
+A common pattern is to carry both a human-readable context string and the underlying source error:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("{context}: {source}")]
+pub struct ContextError {
+    pub context: String,
+    pub source: Box<dyn std::error::Error + Send + Sync + 'static>,
+}
+
+impl ContextError {
+    pub fn new(context: impl Into<String>, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        ContextError {
+            context: context.into(),
+            source: Box::new(source),
+        }
+    }
+}
+```
+
+Because `source` is named `source`, `thiserror` exposes it via `Error::source()` automatically, and it works correctly with boxed trait objects.
+
+## Opaque struct with `#[error(transparent)]`
+
+Use `#[error(transparent)]` on a struct to hide an internal error representation behind a public type. The public struct delegates its `Display` message and `source()` chain entirely to the inner error, making the wrapper invisible to diagnostics tools that walk the error chain.
+
+```rust
+use thiserror::Error;
+
+// PublicError is public, but opaque and easy to keep compatible.
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub struct PublicError(#[from] ErrorRepr);
+
+impl PublicError {
+    /// Returns true if this error was caused by a permission problem.
+    pub fn is_permission_denied(&self) -> bool {
+        matches!(self.0, ErrorRepr::PermissionDenied)
+    }
+}
+
+// Private — free to change across minor versions.
+#[derive(Error, Debug)]
+enum ErrorRepr {
+    #[error("not found")]
+    NotFound,
+    #[error("permission denied")]
+    PermissionDenied,
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+}
+```
+
+Callers see only `PublicError`. The internal `ErrorRepr` enum can gain new variants or restructure completely without breaking any downstream code that only holds `PublicError`.
+
+<Warning>
+  Once you expose `PublicError` in your public API, the `Display` output of the error becomes part of your interface contract. Change it carefully, as callers may be logging or displaying the message.
+</Warning>
+
+## Generic struct errors
+
+Just like enum errors, struct errors can be generic. `thiserror` infers the correct trait bounds automatically:
+
+```rust
+use thiserror::Error;
+
+/// A transparent wrapper around any error type E.
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub struct StructTransparentWrapper<E>(pub E);
+
+/// A struct that carries a generic inner error by name.
+#[derive(Error, Debug)]
+#[error("validation failed: {underlying:?}")]
+pub struct ValidationError<E: std::fmt::Debug> {
+    pub underlying: E,
+}
+```
+
+The macro generates `where E: Display` (or `where E: Error`) as needed, based solely on what the message format and `transparent` annotation actually require.
+
+## Complete example: file processing error
+
+Putting it all together, here is a realistic struct error for a file-processing library:
+
+```rust
+use std::path::PathBuf;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("failed to process {path} at line {line}: {source}")]
+pub struct ProcessingError {
+    /// The file that was being processed when the error occurred.
+    pub path: PathBuf,
+    /// The 1-based line number where processing stopped.
+    pub line: usize,
+    /// The underlying I/O or parse failure.
+    #[source]
+    pub source: ProcessingSource,
+}
+
+#[derive(Error, Debug)]
+pub enum ProcessingSource {
+    #[error("I/O error")]
+    Io(#[from] std::io::Error),
+    #[error("invalid UTF-8")]
+    Utf8(#[from] std::str::Utf8Error),
+    #[error("malformed record: {0}")]
+    Parse(String),
+}
+
+fn process_file(path: &std::path::Path) -> Result<(), ProcessingError> {
+    let contents = std::fs::read(path).map_err(|source| ProcessingError {
+        path: path.to_owned(),
+        line: 0,
+        source: ProcessingSource::Io(source),
+    })?;
+
+    for (i, chunk) in contents.chunks(80).enumerate() {
+        std::str::from_utf8(chunk).map_err(|source| ProcessingError {
+            path: path.to_owned(),
+            line: i + 1,
+            source: ProcessingSource::Utf8(source),
+        })?;
+    }
+
+    Ok(())
+}
+```
+
+## Tips for choosing between struct and enum
+
+<Steps>
+  <Step title="Start with a struct for simple wrappers">
+    If your function only ever fails due to an underlying `io::Error`, wrap it in a named-field struct rather than creating a one-variant enum.
+  </Step>
+  <Step title="Add an enum when variant matching becomes necessary">
+    Once callers need to distinguish specific failure modes (`NotFound` vs `PermissionDenied`), refactor to an enum. Adding an enum later is not a breaking change if the original struct type was not public.
+  </Step>
+  <Step title="Use opaque structs at crate boundaries">
+    Export a `#[error(transparent)]` newtype from your crate. Keep the internal representation private so you can change it freely. Expose accessors for the pieces of context that callers legitimately need.
+  </Step>
+</Steps>

@@ -1,0 +1,304 @@
+---
+title: "Defining Enum Error Types with thiserror"
+sidebarTitle: "Enum Errors"
+description: "Learn how to define idiomatic Rust enum error types using derive(Error), covering every variant shape, #[from] conversions, and generics."
+---
+
+Enums are the most common pattern for defining errors in Rust libraries. They let you express every distinct failure mode as a typed variant, giving callers the ability to match on specific cases and handle them appropriately. The `thiserror` crate's `#[derive(Error)]` macro generates all the standard trait implementations — `Display`, `Error`, and optionally `From` — directly from attribute annotations, with no boilerplate in sight.
+
+## Setup
+
+Add `thiserror` to your `Cargo.toml`:
+
+```toml
+[dependencies]
+thiserror = "2"
+```
+
+Every enum that derives `Error` must also derive `Debug`, since `std::error::Error` has `Debug` as a supertrait.
+
+## The three variant shapes
+
+A `thiserror` enum can contain three kinds of variants, and you can mix all three in the same type.
+
+<Tabs>
+  <Tab title="Unit variants">
+    Unit variants carry no data — they are self-describing through their display message alone. Use them for errors that need no additional context.
+
+    ```rust
+    use thiserror::Error;
+
+    #[derive(Error, Debug)]
+    pub enum ConfigError {
+        #[error("configuration file not found")]
+        NotFound,
+        #[error("configuration file is empty")]
+        Empty,
+        #[error("unknown configuration error")]
+        Unknown,
+    }
+    ```
+
+    `ConfigError::NotFound.to_string()` produces `"configuration file not found"`.
+  </Tab>
+  <Tab title="Tuple variants">
+    Tuple variants wrap one or more values. The `{0}`, `{1}`, … shorthands interpolate positional fields into the message.
+
+    ```rust
+    use std::io;
+    use thiserror::Error;
+
+    #[derive(Error, Debug)]
+    pub enum ParseError {
+        #[error("I/O error while reading input")]
+        Io(io::Error),
+        #[error("unexpected token at byte {0}")]
+        UnexpectedToken(usize),
+        #[error("input too short: need {0} bytes, got {1}")]
+        TooShort(usize, usize),
+    }
+    ```
+
+    Use `{0:?}` for `Debug` formatting, or `{0}` for `Display`.
+  </Tab>
+  <Tab title="Named-field variants">
+    Named-field variants give each piece of context a descriptive name. Field names can be interpolated directly by name in the message string.
+
+    ```rust
+    use thiserror::Error;
+
+    #[derive(Error, Debug)]
+    pub enum ProtocolError {
+        #[error("invalid header: expected {expected:?}, found {found:?}")]
+        InvalidHeader {
+            expected: String,
+            found: String,
+        },
+        #[error("payload too large: limit is {limit} bytes, received {received} bytes")]
+        PayloadTooLarge {
+            limit: usize,
+            received: usize,
+        },
+    }
+    ```
+
+    Named fields make error construction self-documenting at the call site:
+    ```rust
+    return Err(ProtocolError::InvalidHeader {
+        expected: "HTTP/1.1".to_owned(),
+        found: header.to_owned(),
+    });
+    ```
+  </Tab>
+</Tabs>
+
+## Automatic `From` conversion with `#[from]`
+
+Placing `#[from]` on a variant's field generates a `From` implementation so that the `?` operator can automatically convert the source error into your enum variant. The annotated field also becomes the `source()` of the error — you do not need to add `#[source]` separately.
+
+```rust
+use std::io;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum AppError {
+    #[error("I/O operation failed")]
+    Io(#[from] io::Error),
+
+    #[error("failed to parse integer")]
+    Parse(#[from] std::num::ParseIntError),
+
+    #[error("unknown error")]
+    Unknown,
+}
+
+fn read_count(path: &str) -> Result<u32, AppError> {
+    let contents = std::fs::read_to_string(path)?;   // io::Error → AppError::Io
+    let count = contents.trim().parse::<u32>()?;     // ParseIntError → AppError::Parse
+    Ok(count)
+}
+```
+
+<Note>
+  A `#[from]` variant must not contain any other fields besides the source error (and optionally a `Backtrace` field). If you need additional context alongside the source, use `#[source]` instead.
+</Note>
+
+## Combining errors from multiple crates
+
+Real-world library errors often wrap failures from several different dependencies. List each source type in its own `#[from]` variant:
+
+```rust
+use std::io;
+use thiserror::Error;
+
+// Imaginary third-party crates for illustration
+mod db {
+    #[derive(thiserror::Error, Debug)]
+    #[error("database error: {0}")]
+    pub struct Error(String);
+}
+
+mod serde_json {
+    #[derive(thiserror::Error, Debug)]
+    #[error("json error: {0}")]
+    pub struct Error(String);
+}
+
+#[derive(Error, Debug)]
+pub enum DataStoreError {
+    #[error("data store disconnected")]
+    Disconnect(#[from] io::Error),
+
+    #[error("database query failed")]
+    Database(#[from] db::Error),
+
+    #[error("response could not be deserialized")]
+    Deserialize(#[from] serde_json::Error),
+
+    #[error("record not found for key `{0}`")]
+    NotFound(String),
+
+    #[error("unknown data store error")]
+    Unknown,
+}
+```
+
+Each `From<SomeError> for DataStoreError` implementation is generated automatically. Any function that returns `Result<T, DataStoreError>` can now use `?` on `io::Error`, `db::Error`, and `serde_json::Error` without any manual conversion.
+
+## The catch-all variant with `#[error(transparent)]`
+
+Sometimes a library needs a variant that can hold any arbitrary error — for instance, errors from optional plug-ins or user-supplied callbacks. `#[error(transparent)]` forwards both the `Display` message and the `source()` chain straight through to the inner error, so the wrapping variant becomes invisible to callers traversing the chain.
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum CliError {
+    #[error("failed to read config file")]
+    Config(#[from] std::io::Error),
+
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+
+    /// Catch-all: any other error from a plugin or callback.
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+```
+
+`CliError::Other(e).to_string()` returns the same string as `e.to_string()`, and `CliError::Other(e).source()` delegates to `e.source()`.
+
+## Generic error enums
+
+`thiserror` understands Rust generics and automatically infers the correct where-clause bounds for `Display` and `Error`. This is useful when you want an error type that is generic over the kind of inner value it wraps.
+
+```rust
+use thiserror::Error;
+
+/// An error that carries a generic inner error type.
+#[derive(Error, Debug)]
+pub enum EnumFromGeneric<E>
+where
+    E: std::error::Error + 'static,
+{
+    #[error("operation failed: {0}")]
+    Source(#[from] E),
+}
+
+/// A transparent wrapper for any error type.
+#[derive(Error, Debug)]
+pub enum Wrapper<E> {
+    #[error(transparent)]
+    Inner(E),
+}
+```
+
+The macro generates bounds such as `E: Display` for message interpolation or `E: Error` for transparent forwarding — only what is actually required by the annotations you use.
+
+```rust
+use std::num::ParseIntError;
+
+type MyError = EnumFromGeneric<ParseIntError>;
+
+fn parse(s: &str) -> Result<i32, MyError> {
+    Ok(s.parse::<i32>()?)   // ParseIntError → MyError::Source via #[from]
+}
+```
+
+## Format string capabilities
+
+The `#[error("...")]` message is a full Rust format string. You can use named arguments, positional arguments, debug formatting, and even call helper functions:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum VideoError {
+    // Named fields referenced directly
+    #[error("frame {frame} exceeds codec limit of {max} frames")]
+    TooManyFrames { frame: u64, max: u64 },
+
+    // Debug formatting with :?
+    #[error("unsupported codec: {0:?}")]
+    UnsupportedCodec(String),
+
+    // Named extra argument with arbitrary expression
+    #[error("invalid lookahead {0} (expected < {max})", max = i32::MAX)]
+    InvalidLookahead(u32),
+
+    // Escape literal braces with {{ and }}
+    #[error("expression result was {{}}")]
+    EmptyResult,
+}
+```
+
+## Inheritance: a top-level `#[error]` as default
+
+When every variant in an enum should share the same message format, you can place `#[error("...")]` on the enum itself. Individual variants can still override it:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("{0}")]   // default: display the first field
+pub enum SimpleError {
+    NotFound(&'static str),
+    Forbidden(&'static str),
+    #[error("internal server error")]
+    Internal,   // overrides the default
+}
+
+assert_eq!(
+    SimpleError::NotFound("resource").to_string(),
+    "resource"
+);
+assert_eq!(SimpleError::Internal.to_string(), "internal server error");
+```
+
+## Best practices for library error enums
+
+<Steps>
+  <Step title="Name the type after the domain, not the operation">
+    Prefer `DatabaseError` or `ConfigError` over `ReadError` or `WriteError`. The type name appears in `match` arms and should communicate what subsystem failed.
+  </Step>
+  <Step title="Keep variants coarse-grained at first">
+    Start with a few broad variants and add more only when callers demonstrate a need to distinguish them. Adding a variant is backward-compatible; removing one is a breaking change.
+  </Step>
+  <Step title="Use #[non_exhaustive] to allow future additions">
+    Annotate your public error enum with `#[non_exhaustive]` so that adding new variants does not break downstream `match` expressions.
+
+    ```rust
+    #[non_exhaustive]
+    #[derive(thiserror::Error, Debug)]
+    pub enum LibError {
+        #[error("not found")]
+        NotFound,
+        #[error("permission denied")]
+        PermissionDenied,
+    }
+    ```
+  </Step>
+  <Step title="Avoid leaking internal dependency types in #[from] variants">
+    If the source type comes from a private dependency, wrap it in a newtype or use `#[source]` with a separate conversion function to prevent your public API from depending on that crate's version.
+  </Step>
+</Steps>

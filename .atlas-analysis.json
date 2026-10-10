@@ -1,0 +1,61 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "thiserror",
+  "projectDescription": "A Rust procedural macro crate that provides a convenient derive macro for implementing std::error::Error on struct and enum error types.",
+  "theme": "luma",
+  "primaryColor": "#428bca",
+  "lightColor": "#241c1c",
+  "darkColor": null,
+  "navigation": {
+    "groups": [
+      {
+        "group": "Get Started",
+        "pages": [
+          "introduction",
+          "quickstart"
+        ]
+      },
+      {
+        "group": "Attributes Reference",
+        "pages": [
+          "attributes/error",
+          "attributes/from",
+          "attributes/source",
+          "attributes/backtrace",
+          "attributes/transparent"
+        ]
+      },
+      {
+        "group": "Guides",
+        "pages": [
+          "guides/error-enums",
+          "guides/error-structs",
+          "guides/error-chaining",
+          "guides/no-std",
+          "guides/vs-anyhow"
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Derive macro for std::error::Error trait on structs and enums",
+    "Automatic Display impl generation via #[error(\"...\")] attribute",
+    "Automatic From impl generation via #[from] attribute for error conversion",
+    "Source error chaining via #[source] attribute",
+    "Backtrace capture support via Backtrace field detection",
+    "Transparent error forwarding with #[error(transparent)]",
+    "no_std compatible (with optional std feature)",
+    "Zero cost: does not appear in public API, equivalent to hand-written impls",
+    "Support for enums, named-field structs, tuple structs, and unit structs",
+    "Format string interpolation with field shorthands"
+  ],
+  "publicApiSurface": [
+    "#[derive(Error)]",
+    "#[error(\"...\")]",
+    "#[error(transparent)]",
+    "#[error(fmt = ...)]",
+    "#[from]",
+    "#[source]",
+    "#[backtrace]"
+  ]
+}

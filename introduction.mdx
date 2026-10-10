@@ -1,0 +1,178 @@
+---
+title: "thiserror: Rust derive macro for std::error::Error"
+sidebarTitle: "Introduction"
+description: "thiserror is a Rust procedural macro that derives std::error::Error for your enums and structs, eliminating boilerplate without polluting your public API."
+---
+
+thiserror is a Rust procedural macro crate that provides `#[derive(Error)]` for `std::error::Error`. Rather than manually implementing `Display`, `From`, and `source()` for every error type you define, you annotate your structs and enums with a handful of attributes and thiserror generates all the necessary trait implementations at compile time — producing code identical to what you would have written by hand. The crate has no runtime overhead, adds nothing to your binary size beyond what the generated impls themselves cost, and — crucially — **does not appear in your public API at all**.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Add thiserror to your project and define your first working error type in under five minutes.
+  </Card>
+  <Card title="Error Attribute Reference" icon="tag" href="/attributes/error">
+    Full reference for `#[error("...")]` — message templates, field interpolation, and transparent forwarding.
+  </Card>
+  <Card title="Error Enum Patterns" icon="list-tree" href="/guides/error-enums">
+    Practical recipes for designing enum-based error types for libraries and applications.
+  </Card>
+  <Card title="thiserror vs anyhow" icon="scale-balanced" href="/guides/vs-anyhow">
+    Understand when to reach for thiserror versus anyhow, and when to use both in the same project.
+  </Card>
+</CardGroup>
+
+## Design philosophy
+
+The single most important property of thiserror is that **it deliberately does not appear in your public API**. When you derive `Error` on a type, the generated code is exactly what an experienced Rust developer would write by hand — a `Display` impl, a `From` impl where requested, and an implementation of `source()`. Because the output is ordinary Rust code, adding thiserror to an existing type or removing it in favour of a handwritten implementation are both non-breaking changes. Your downstream users and their compiled code never know thiserror was involved.
+
+<Note>
+  Switching between handwritten `std::error::Error` impls and thiserror-derived ones is never a breaking change. thiserror is a compile-time tool only; it leaves no trace in your crate's public interface.
+</Note>
+
+## Supported error shapes
+
+thiserror works with all four forms that a Rust error type can take:
+
+| Shape | Example |
+|---|---|
+| Enum | `pub enum AppError { NotFound, Io(#[from] io::Error) }` |
+| Named-field struct | `pub struct ConfigError { path: PathBuf, #[source] cause: io::Error }` |
+| Tuple struct | `pub struct Wrapped(#[from] serde_json::Error)` |
+| Unit struct | `pub struct NotFoundError` |
+
+Every shape supports the full set of thiserror attributes — there is no feature that is exclusive to enums or structs.
+
+## Attributes at a glance
+
+thiserror exposes four attributes that control code generation. All of them are compile-time only.
+
+### `#[error("...")]`
+
+Placed on the struct or on individual enum variants, this attribute generates a `Display` implementation. The message string is a format template that can embed field values directly:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum QueryError {
+    // Positional field: {0} refers to the first unnamed field
+    #[error("relation `{0}` does not exist")]
+    UnknownRelation(String),
+
+    // Named field using debug format
+    #[error("type mismatch (expected {expected:?}, found {found:?})")]
+    TypeMismatch { expected: String, found: String },
+}
+```
+
+The shorthand expansions are:
+
+- `{var}` → `write!("{}", self.var)`
+- `{0}` → `write!("{}", self.0)`
+- `{var:?}` → `write!("{:?}", self.var)`
+- `{0:?}` → `write!("{:?}", self.0)`
+
+You can also pass arbitrary format expressions by prefixing field references with `.` when used alongside extra arguments:
+
+```rust
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("invalid index {idx}, expected between {} and {}", .limits.lo, .limits.hi)]
+    OutOfBounds { idx: usize, limits: Limits },
+}
+```
+
+### `#[from]`
+
+Placed on a field, `#[from]` generates a `From<FieldType> for YourError` implementation so that the `?` operator can automatically convert the inner error type into your error type. It also implicitly marks the field as `#[source]`.
+
+```rust
+#[derive(Error, Debug)]
+pub enum AppError {
+    #[error("I/O failure")]
+    Io(#[from] std::io::Error),
+
+    #[error("JSON parse failure")]
+    Json(#[from] serde_json::Error),
+}
+```
+
+### `#[source]`
+
+Placed on a field (or implied by naming the field `source`), this attribute causes `Error::source()` to return that field as the underlying cause. Use `#[source]` when you want to expose a cause chain without generating a `From` impl.
+
+```rust
+#[derive(Error, Debug)]
+pub struct DatabaseError {
+    pub query: String,
+    #[source]
+    pub cause: sqlx::Error,
+}
+```
+
+### `#[backtrace]`
+
+When a field has a type named `Backtrace` (from `std::backtrace::Backtrace`), thiserror automatically implements `Error::provide()` to supply that backtrace to the error-reporting infrastructure. Applying `#[backtrace]` to a *source* field instead forwards `provide()` down to the source, so the two errors share a single backtrace capture.
+
+```rust
+use std::backtrace::Backtrace;
+
+#[derive(Error, Debug)]
+pub struct MyError {
+    msg: String,
+    backtrace: Backtrace, // automatically detected and provided
+}
+```
+
+<Note>
+  `Backtrace` support requires a nightly compiler (Rust 1.73+) because it uses the unstable `error_generic_member_access` feature. On stable Rust the field is compiled in but `provide()` is not generated.
+</Note>
+
+### `#[error(transparent)]`
+
+Transparent errors forward both `Display` and `source()` straight through to an inner error without adding any extra message layer. This is useful for "catch-all" enum variants and for wrapping an internal error representation behind an opaque public type:
+
+```rust
+#[derive(Error, Debug)]
+pub enum ServiceError {
+    #[error("authentication failed: {0}")]
+    Auth(String),
+
+    // All other errors are forwarded transparently
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+```
+
+## When to use thiserror vs anyhow
+
+Both crates are authored by the same developer and are designed to complement each other, not compete.
+
+**Use thiserror** when you are writing library code and want callers to be able to match on specific error variants, or when you want to design a deliberate, structured error type that communicates exactly what can go wrong. thiserror is the right choice whenever the consumer of your errors is another programmer who needs to handle failures programmatically.
+
+**Use anyhow** when you are writing application code — CLI tools, services, scripts — and you just need errors to propagate and display cleanly without investing in a detailed type hierarchy. anyhow's `Error` is an erased, heap-allocated error that accepts any `std::error::Error` value via `?`.
+
+See the [thiserror vs anyhow guide](/guides/vs-anyhow) for a deeper comparison, including scenarios where it makes sense to use both in the same project.
+
+## Requirements and installation
+
+Add thiserror to `Cargo.toml`:
+
+```toml
+[dependencies]
+thiserror = "2"
+```
+
+| Requirement | Value |
+|---|---|
+| Minimum Rust version | 1.77 |
+| Current version | 2.0.21 |
+| License | MIT OR Apache-2.0 |
+| `no_std` support | Yes (disable the `std` feature) |
+
+The `std` feature is enabled by default. It adds a convenience that lets you interpolate `std::path::Path` and `std::path::PathBuf` values directly in `#[error("...")]` messages without calling `.display()`. In a `no_std` environment, disable it:
+
+```toml
+[dependencies]
+thiserror = { version = "2", default-features = false }
+```

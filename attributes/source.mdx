@@ -1,0 +1,174 @@
+---
+title: "#[source] — Linking Error Causes with source()"
+sidebarTitle: "#[source]"
+description: "Mark a field with #[source] (or name it 'source') to implement Error::source(), exposing the underlying cause of an error for inspection and display."
+---
+
+The `#[source]` attribute marks a field as the underlying cause of an error. When present, thiserror generates an implementation of `Error::source()` that returns that field as a `&dyn Error`. This is the standard mechanism for chaining errors in Rust: callers can walk the chain of `.source()` calls to understand the full context of a failure.
+
+## Basic usage
+
+Add `#[source]` to any field whose type implements `std::error::Error`:
+
+```rust
+use std::io;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("database error: {msg}")]
+pub struct DbError {
+    msg: String,
+    #[source]
+    cause: io::Error,
+}
+```
+
+The generated `Error::source()` implementation returns `Some(&self.cause)` cast to `&dyn Error`.
+
+## Implicit detection by field name
+
+If a field is named exactly `source`, thiserror automatically treats it as the source without requiring the explicit attribute. The following two definitions are equivalent:
+
+```rust
+use std::io;
+use thiserror::Error;
+
+// Explicit attribute — always works
+#[derive(Error, Debug)]
+#[error("explicit source")]
+pub struct ExplicitSource {
+    context: String,
+    #[source]
+    io: io::Error,
+}
+
+// Implicit detection by field name
+#[derive(Error, Debug)]
+#[error("implicit source")]
+pub struct ImplicitSource {
+    source: io::Error,  // no attribute needed
+}
+```
+
+<Note>
+The automatic name-based detection only fires when the field is **named** `source`. If you rename the field to anything else, you must add `#[source]` explicitly.
+</Note>
+
+## Field name `source` without source semantics
+
+If you have a field literally named `source` but do not want it treated as the error source — for example because it holds a plain `String` — use the raw identifier syntax `r#source` to opt out:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("{source} ==> {destination}")]
+pub struct NotSource {
+    r#source: char,       // raw identifier: NOT treated as Error::source()
+    destination: char,
+}
+```
+
+When `source` is written with `r#`, thiserror does not generate a `source()` implementation for that field.
+
+## Accepted field types
+
+The source field type must satisfy one of the following:
+
+- Implement `std::error::Error` directly (e.g. `io::Error`, `anyhow::Error`).
+- Be a type that dereferences to `dyn std::error::Error` (e.g. `Box<dyn Error>`, `Arc<dyn Error>`).
+- Be an `Option<T>` where `T` meets either of the above criteria (see below).
+
+```rust
+use std::error::Error as StdError;
+use std::io;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("boxed source")]
+pub struct BoxedSource {
+    #[source]
+    source: Box<dyn StdError + Send + 'static>,
+}
+```
+
+## `Option<E>` sources
+
+A source field can be wrapped in `Option`. When the option is `None`, `source()` returns `None`. When it is `Some`, `source()` returns `Some(&inner)`:
+
+```rust
+use std::io;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("maybe-caused error")]
+pub struct MaybeSourced {
+    #[source]
+    cause: Option<io::Error>,
+}
+```
+
+This is useful when you have an error that may or may not have an underlying cause depending on how it was constructed.
+
+## Non-static lifetimes are rejected
+
+The type of a `#[source]` field may not contain non-static lifetimes, because `Error::source()` is defined to return `&(dyn Error + 'static)`. Thiserror enforces this at compile time:
+
+```
+non-static lifetimes are not allowed in the source of an error,
+because std::error::Error requires the source is dyn Error + 'static
+```
+
+## `#[from]` implies `#[source]`
+
+When you use `#[from]` on a field, it automatically implies `#[source]`. You never need to write both attributes on the same field:
+
+```rust
+use std::io;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum MyError {
+    // #[from] generates From<io::Error> AND sets up Error::source()
+    #[error("io failure")]
+    Io(#[from] io::Error),
+}
+```
+
+## Enum variants
+
+Each enum variant can have its own source field. Only the variant that matches is consulted when `source()` is called:
+
+```rust
+use std::io;
+use std::num::ParseIntError;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum AppError {
+    #[error("io error")]
+    Io {
+        #[source]
+        cause: io::Error,
+    },
+    #[error("parse error")]
+    Parse {
+        #[source]
+        cause: ParseIntError,
+    },
+    #[error("unknown error")]
+    Unknown,
+}
+```
+
+For the `Unknown` variant, `source()` returns `None`. For the others, it returns `Some` pointing to the respective cause.
+
+## Constraint: at most one source per variant
+
+Each variant or struct may designate at most one field as the source. Placing `#[source]` on two different fields within the same variant is a compile error:
+
+```
+duplicate #[source] attribute
+```
+
+Similarly, a field that has `#[from]` on it cannot also have a separate field with `#[source]`; they must refer to the same field.

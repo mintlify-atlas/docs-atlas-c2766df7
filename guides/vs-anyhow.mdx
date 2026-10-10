@@ -1,0 +1,243 @@
+---
+title: "thiserror vs anyhow: Choosing the Right Error Library"
+sidebarTitle: "vs anyhow"
+description: "Understand when to use thiserror versus anyhow for Rust error handling, and how to combine both in library and application code."
+---
+
+`thiserror` and `anyhow` are both authored by David Tolnay and are the most widely used error-handling libraries in the Rust ecosystem. They solve different problems, and the right choice depends on whether you are writing library code or application code. The good news is that they compose seamlessly — you can and should use both in the same project.
+
+The core distinction, from the `thiserror` README itself:
+
+> Use thiserror if you care about designing your own dedicated error type(s) so that the caller receives exactly the information that you choose in the event of failure. This most often applies to library-like code. Use Anyhow if you don't care what error type your functions return, you just want it to be easy. This is common in application-like code.
+
+## The fundamental difference
+
+<CardGroup cols={2}>
+  <Card title="thiserror" icon="wrench">
+    **For library code.** You define structured error types that callers can match on, inspect, and handle programmatically. The error type is part of your public API.
+  </Card>
+  <Card title="anyhow" icon="bolt">
+    **For application code.** Any error can be stored in a single `anyhow::Error`. You propagate errors easily and display them to the user, but you do not match on specific variants.
+  </Card>
+</CardGroup>
+
+## When to use thiserror
+
+Use `thiserror` when **you are the error producer** and you care about what information reaches callers:
+
+- You are writing a library crate and its consumers need to distinguish error cases
+- You want callers to be able to write `match err { MyError::NotFound => …, MyError::PermissionDenied => … }`
+- You need structured fields on errors (a path, a line number, an HTTP status code) that callers can read programmatically
+- You want to avoid leaking implementation details — callers should see your error type, not your dependency's
+
+```rust
+// A library crate defines typed, matchable errors with thiserror.
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum DatabaseError {
+    #[error("record not found: id={id}")]
+    NotFound { id: u64 },
+
+    #[error("connection failed")]
+    ConnectionFailed(#[from] std::io::Error),
+
+    #[error("query timed out after {secs}s")]
+    Timeout { secs: u64 },
+}
+```
+
+A caller of this library can match exhaustively on `DatabaseError` and handle each case:
+
+```rust
+match db.find_user(id) {
+    Ok(user) => println!("Found: {}", user.name),
+    Err(DatabaseError::NotFound { id }) => println!("No user with id {id}"),
+    Err(DatabaseError::Timeout { secs }) => {
+        eprintln!("Query timed out after {secs}s, retrying...");
+        retry();
+    }
+    Err(e) => return Err(e.into()),
+}
+```
+
+## When to use anyhow
+
+Use `anyhow` when **you are the error consumer** and you just need failures to propagate:
+
+- You are writing a binary, CLI tool, or application where errors are logged or displayed rather than matched on
+- You want to attach context to any error with `.context("what I was doing")`
+- You are prototyping and want to return `anyhow::Result<T>` from everything without designing error types up front
+- Functions call into many different libraries and you do not want to enumerate all possible error types in an enum
+
+```rust
+// An application binary uses anyhow for easy propagation.
+use anyhow::{Context, Result};
+
+fn run() -> Result<()> {
+    let config = std::fs::read_to_string("/etc/myapp/config.toml")
+        .context("failed to read configuration file")?;
+
+    let port: u16 = config.trim().parse()
+        .context("configuration file must contain a port number")?;
+
+    println!("Starting server on port {port}");
+    Ok(())
+}
+
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("Error: {err:?}");
+        std::process::exit(1);
+    }
+}
+```
+
+`anyhow`'s `{:?}` format prints the full error chain with all context messages, which is ideal for application diagnostics.
+
+## Side-by-side comparison
+
+<Tabs>
+  <Tab title="Library (thiserror)">
+    ```rust
+    // src/lib.rs — a library crate
+    use std::path::PathBuf;
+    use thiserror::Error;
+
+    #[derive(Error, Debug)]
+    pub enum ConfigError {
+        #[error("config file not found at {path}")]
+        NotFound { path: PathBuf },
+
+        #[error("config file could not be read")]
+        Io(#[from] std::io::Error),
+
+        #[error("invalid key {key:?}: {reason}")]
+        InvalidKey { key: String, reason: String },
+    }
+
+    pub fn load_config(path: &std::path::Path) -> Result<String, ConfigError> {
+        if !path.exists() {
+            return Err(ConfigError::NotFound {
+                path: path.to_owned(),
+            });
+        }
+        let content = std::fs::read_to_string(path)?;  // io::Error → ConfigError::Io
+        Ok(content)
+    }
+    ```
+
+    The library exposes `ConfigError` as part of its public API. Callers can match on it.
+  </Tab>
+  <Tab title="Application (anyhow)">
+    ```rust
+    // src/main.rs — an application binary
+    use anyhow::{Context, Result};
+
+    fn main() -> Result<()> {
+        // ConfigError converts into anyhow::Error automatically via ?
+        let config = mylib::load_config(std::path::Path::new("config.toml"))
+            .context("startup failed")?;
+
+        println!("Loaded config ({} bytes)", config.len());
+        Ok(())
+    }
+    ```
+
+    The application does not match on `ConfigError` variants — it just propagates the error with added context.
+  </Tab>
+</Tabs>
+
+## They are composable by design
+
+`thiserror` errors implement `std::error::Error`, which means they convert into `anyhow::Error` automatically via the `?` operator. No adapter code is needed:
+
+```rust
+use anyhow::Result;
+
+fn application_main() -> Result<()> {
+    // DatabaseError (thiserror) → anyhow::Error
+    let record = db.find_user(42)?;
+
+    // ConfigError (thiserror) → anyhow::Error
+    let config = load_config(Path::new("app.toml"))?;
+
+    // Any other error → anyhow::Error
+    let content = std::fs::read_to_string("data.csv")?;
+
+    Ok(())
+}
+```
+
+`anyhow` preserves the source chain of `thiserror` errors. When you print an `anyhow::Error` with `{:?}`, it walks the entire chain including any `source()` links your `thiserror` types established.
+
+<Note>
+  The reverse does not apply: `anyhow::Error` cannot easily be converted into a specific `thiserror` type, because `anyhow::Error` erases type information. This is intentional — the flow is always: structured errors at library boundaries, dynamic errors in application glue.
+</Note>
+
+## Matching library errors in application code
+
+Sometimes an application does need to inspect a specific library error. This is fine — you use `anyhow` for the overall return type but downcast when needed:
+
+```rust
+use anyhow::Result;
+use mylib::DatabaseError;
+
+fn find_or_create_user(id: u64) -> Result<User> {
+    match db.find_user(id) {
+        Ok(user) => Ok(user),
+        Err(DatabaseError::NotFound { .. }) => {
+            // Handle the specific case we care about
+            db.create_user(id).map_err(Into::into)
+        }
+        Err(other) => Err(other.into()), // all other cases become anyhow::Error
+    }
+}
+```
+
+Or, using `anyhow`'s `downcast_ref` after propagation:
+
+```rust
+fn handle_error(err: &anyhow::Error) {
+    if let Some(db_err) = err.downcast_ref::<DatabaseError>() {
+        match db_err {
+            DatabaseError::NotFound { id } => eprintln!("Missing record {id}"),
+            _ => eprintln!("Database error: {err}"),
+        }
+    }
+}
+```
+
+## Feature comparison at a glance
+
+| | thiserror | anyhow |
+|---|---|---|
+| Primary use case | Library error types | Application error handling |
+| Error type | Your custom type | `anyhow::Error` (type-erased) |
+| Caller can `match` on variants | ✅ Yes | ❌ No (use `downcast_ref`) |
+| Attaches context with `.context()` | ❌ No | ✅ Yes |
+| Backtrace capture | Via `std::backtrace::Backtrace` field | Automatic (on nightly) |
+| `no_std` support | ✅ Yes | ❌ No |
+| Appears in public API | Yes (by design) | No (`anyhow::Error` hides details) |
+| Can convert into the other | ✅ `thiserror` → `anyhow::Error` via `?` | N/A |
+
+## The recommended pattern
+
+<Steps>
+  <Step title="Design your library errors with thiserror">
+    Define one (or a small number of) public error enums using `#[derive(Error)]`. Give each variant exactly the fields that callers need to decide how to handle the error.
+  </Step>
+  <Step title="Use anyhow in your binary or application layer">
+    Return `anyhow::Result<T>` from `main` and from internal application functions that cross multiple library boundaries. Use `.context("what was happening")` to add human-readable context at each propagation point.
+  </Step>
+  <Step title="Let ? do the conversion automatically">
+    Any `thiserror` error implements `std::error::Error` and converts into `anyhow::Error` via `?` with no manual adapter code needed. The source chain is preserved.
+  </Step>
+  <Step title="Downcast only when you must">
+    If application code genuinely needs to inspect a specific library error variant, use `err.downcast_ref::<LibError>()` on an `anyhow::Error` rather than making the whole function return the library's error type.
+  </Step>
+</Steps>
+
+<Tip>
+  A useful rule of thumb: if the function is called by code you do not control (i.e., it's part of a public API), use `thiserror`. If the function is only called from within your own application, `anyhow` is usually simpler and sufficient.
+</Tip>

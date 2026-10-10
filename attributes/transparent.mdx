@@ -1,0 +1,171 @@
+---
+title: "#[error(transparent)] — Forwarding Display and source()"
+sidebarTitle: "#[error(transparent)]"
+description: "Use #[error(transparent)] to delegate both Display and Error::source() straight through to a single inner field, with no added message layer."
+---
+
+`#[error(transparent)]` is a special form of the `#[error]` attribute that forwards both the `Display` implementation and the `Error::source()` method directly to the single inner field of the type or variant. No wrapping message is added; the inner error speaks for itself. This makes the outer type completely invisible in the error chain.
+
+## How it works
+
+When you write `#[error(transparent)]`, thiserror generates:
+
+- A `Display` impl that calls `Display::fmt` on the single inner field.
+- An `Error::source()` impl that delegates to the inner field's own `source()` method.
+
+The outer type becomes a transparent shell: `to_string()` returns the inner error's string, and `source()` returns the inner error's source.
+
+## Use case 1 — catch-all enum variant
+
+The most common use is an "anything else" variant in an enum, wrapping a type like `anyhow::Error` that can hold any error:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum AppError {
+    #[error("not found: {0}")]
+    NotFound(String),
+
+    #[error("permission denied")]
+    PermissionDenied,
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),  // Display and source() delegate to anyhow::Error
+}
+```
+
+In this example, `AppError::Other(e).to_string()` returns exactly `e.to_string()`, and `AppError::Other(e).source()` returns `e.source()`. The variant is entirely invisible.
+
+## Use case 2 — opaque public error type
+
+Another valuable pattern is wrapping a private implementation type behind a public opaque error. This lets the crate's internal error representation evolve freely across minor versions, because nothing in the public API exposes the internal structure:
+
+```rust
+use thiserror::Error;
+
+// PublicError is public, but opaque and easy to keep compatible.
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub struct PublicError(#[from] ErrorRepr);
+
+impl PublicError {
+    // Add accessors for anything you want to expose publicly.
+    pub fn is_not_found(&self) -> bool {
+        matches!(&self.0, ErrorRepr::NotFound(_))
+    }
+}
+
+// Private and free to change across minor versions of the crate.
+#[derive(Error, Debug)]
+enum ErrorRepr {
+    #[error("not found: {0}")]
+    NotFound(String),
+
+    #[error("permission denied")]
+    PermissionDenied,
+}
+```
+
+Consumers of the crate interact only with `PublicError`. The `Display` output and `source()` chain come from `ErrorRepr` transparently, but `ErrorRepr` itself is not part of the public API.
+
+## The single-field constraint
+
+`#[error(transparent)]` requires the type or variant to have **exactly one field**. Placing it on a type or variant with zero or more than one field is a compile error:
+
+```
+#[error(transparent)] requires exactly one field
+```
+
+The field can be named or unnamed:
+
+```rust
+use thiserror::Error;
+
+// Tuple struct — one unnamed field
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub struct Wrapper(SomeInnerError);
+
+// Named struct — one named field
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub struct NamedWrapper {
+    inner: SomeInnerError,
+}
+```
+
+## Interaction with `#[source]`
+
+A transparent error struct or variant may not also contain a `#[source]` attribute. Since `source()` is already forwarded to the inner field, adding an explicit `#[source]` would be contradictory:
+
+```
+transparent error struct can't contain #[source]
+transparent variant can't contain #[source]
+```
+
+## Transparent with generic types
+
+`#[error(transparent)]` works with generic enum variants. Thiserror infers the necessary `Error` bounds on the generic type parameter automatically:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum Error<E> {
+    #[error("this failed: {0}")]
+    This(String),
+
+    #[error(transparent)]
+    Other(E),             // requires E: Error; inferred automatically
+}
+```
+
+## Mutual exclusivity with display attributes
+
+`#[error(transparent)]` and `#[error("...")]` cannot both appear on the same item:
+
+```
+cannot have both #[error(transparent)] and a display attribute
+```
+
+Similarly, `#[error(transparent)]` and `#[error(fmt = ...)]` are mutually exclusive:
+
+```
+cannot have both #[error(transparent)] and #[error(fmt = ...)]
+```
+
+Choose one: either write a format string (or delegate to a format function), or use `transparent` to forward everything to the inner field.
+
+## Transparent structs in tests
+
+The following shows the tested behavior of transparent delegation — the outer error's display and source both come from the inner type:
+
+```rust
+use std::error::Error as _;
+use std::io;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+enum ErrorKind {
+    #[error("E0")]
+    E0,
+    #[error("E1")]
+    E1(#[from] io::Error),
+}
+
+#[derive(Error, Debug)]
+#[error(transparent)]
+struct Error(ErrorKind);
+
+// Error::E0 variant: display is "E0", source is None
+let e = Error(ErrorKind::E0);
+assert_eq!("E0", e.to_string());
+assert!(e.source().is_none());
+
+// Error::E1 variant: display is "E1", source is the io::Error
+let io_err = io::Error::other("oh no!");
+let e = Error(ErrorKind::E1(io_err));
+assert_eq!("E1", e.to_string());
+let _ = e.source().unwrap().downcast_ref::<io::Error>().unwrap();
+```

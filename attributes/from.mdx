@@ -1,0 +1,174 @@
+---
+title: "#[from] — Automatic From Conversions for Error Variants"
+sidebarTitle: "#[from]"
+description: "Apply #[from] to a field to generate impl From<FieldType> for your error type, enabling ergonomic ? propagation. Always implies #[source]."
+---
+
+The `#[from]` attribute tells thiserror to generate an `impl From<T> for YourError` for the annotated field, where `T` is the type of that field. This is the mechanism behind the idiomatic `?` operator in Rust: when you return a `Result<_, YourError>` and a called function returns `Result<_, SomeOtherError>`, adding `#[from]` to the relevant variant lets `?` automatically convert the inner error without any manual `map_err` call.
+
+## Basic usage
+
+Annotate a single field in a tuple-style or named-style variant with `#[from]`:
+
+```rust
+use std::io;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum MyError {
+    #[error("io failure")]
+    Io(#[from] io::Error),
+
+    #[error("parse failure")]
+    Parse(#[from] std::num::ParseIntError),
+}
+```
+
+Thiserror generates:
+
+```rust
+impl From<io::Error> for MyError {
+    fn from(source: io::Error) -> Self {
+        MyError::Io(source)
+    }
+}
+
+impl From<std::num::ParseIntError> for MyError {
+    fn from(source: std::num::ParseIntError) -> Self {
+        MyError::Parse(source)
+    }
+}
+```
+
+This means the following code compiles without any `map_err`:
+
+```rust
+fn read_number(path: &str) -> Result<i32, MyError> {
+    let text = std::fs::read_to_string(path)?;  // io::Error -> MyError::Io via From
+    let n = text.trim().parse::<i32>()?;        // ParseIntError -> MyError::Parse via From
+    Ok(n)
+}
+```
+
+## Named fields
+
+`#[from]` is most common on unnamed (tuple) fields, but it also works on named fields:
+
+```rust
+use std::io;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("...")]
+pub enum ErrorEnum {
+    Test {
+        #[from]
+        source: io::Error,
+    },
+}
+```
+
+## Structs
+
+`#[from]` works on structs too, not only enums:
+
+```rust
+use std::io;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("io error")]
+pub struct IoError {
+    #[from]
+    source: io::Error,
+}
+
+#[derive(Error, Debug)]
+#[error("io error")]
+pub struct TupleIoError(#[from] io::Error);
+```
+
+## `#[from]` always implies `#[source]`
+
+A field annotated with `#[from]` is automatically treated as the `#[source]` field. You never need both attributes on the same field; adding both is redundant and will be flagged as an error by the compiler. The `Error::source()` method is generated based on the same field.
+
+<Tip>
+Because `#[from]` implies `#[source]`, consumers of your error can always call `.source()` to retrieve the original inner error, regardless of whether they used the `From` conversion or constructed the variant directly.
+</Tip>
+
+## Field restrictions
+
+A variant or struct using `#[from]` may only contain two kinds of fields:
+
+1. The single `#[from]`-annotated source field.
+2. An optional `Backtrace` field (see [Backtrace](/attributes/backtrace)).
+
+Any additional field causes a compile error:
+
+```
+deriving From requires no fields other than source and backtrace
+```
+
+This is enforced because the generated `From` impl cannot know how to populate arbitrary extra fields.
+
+## Optional source types
+
+The source field may be wrapped in `Option<T>`. In that case thiserror generates a `From<T>` impl (not `From<Option<T>>`), and wraps the converted value in `Some(...)` automatically:
+
+```rust
+use std::io;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("...")]
+pub struct OptionalSource {
+    #[from]
+    source: Option<io::Error>,
+}
+
+// Generated impl accepts io::Error directly:
+// impl From<io::Error> for OptionalSource {
+//     fn from(source: io::Error) -> Self {
+//         OptionalSource { source: Some(source) }
+//     }
+// }
+```
+
+## `#[from]` cannot appear on the same field as another `#[from]`
+
+Each variant or struct may have at most one `#[from]` field. Placing `#[from]` on two different fields within the same item is a compile error.
+
+Similarly, `#[from]` must go on a specific field, not on the struct or enum item itself — the placement on the item level is a compile error:
+
+```
+not expected here; the #[from] attribute belongs on a specific field
+```
+
+## Non-static lifetimes are forbidden
+
+The type of a `#[from]`-annotated field must not contain non-static lifetimes. This is because `std::error::Error` requires `source()` to return `dyn Error + 'static`:
+
+```
+non-static lifetimes are not allowed in the source of an error,
+because std::error::Error requires the source is dyn Error + 'static
+```
+
+## Interaction with `#[from]` + `Backtrace`
+
+When a `#[from]` variant also contains a `Backtrace` field, the backtrace is automatically captured inside the generated `From` impl at the moment of conversion. See [#\[backtrace\]](/attributes/backtrace) for the full explanation.
+
+```rust
+use std::backtrace::Backtrace;
+use std::io;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum MyError {
+    #[error("io failure")]
+    Io {
+        #[from]
+        source: io::Error,
+        backtrace: Backtrace,  // captured automatically inside From::from
+    },
+}
+```

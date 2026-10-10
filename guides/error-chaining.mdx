@@ -1,0 +1,296 @@
+---
+title: "Error Chaining and Propagation with thiserror"
+sidebarTitle: "Error Chaining"
+description: "Learn how to chain errors, expose root causes via source(), and propagate failures ergonomically with the ? operator using thiserror."
+---
+
+Error chaining connects a high-level error that your callers see to the low-level root cause that actually triggered the failure. This makes diagnostics dramatically easier: instead of showing only "configuration loading failed", a properly chained error chain shows "configuration loading failed → failed to read file → permission denied (os error 13)". The standard library models this through `std::error::Error::source()`, and `thiserror` makes it trivial to implement.
+
+## How `source()` works
+
+`std::error::Error` has a single method of interest for chaining:
+
+```rust
+fn source(&self) -> Option<&(dyn std::error::Error + 'static)>
+```
+
+When an error wraps another error, it returns that inner error from `source()`. Diagnostic tools — logging frameworks, panic hooks, `anyhow`'s context display — walk this chain automatically by calling `source()` repeatedly until it returns `None`.
+
+`thiserror` generates the `source()` implementation for you. You only need to tell it which field is the source.
+
+## Three ways to designate a source field
+
+<Tabs>
+  <Tab title="Name the field `source`">
+    The simplest approach: name the field `source`. No attribute is required.
+
+    ```rust
+    use thiserror::Error;
+
+    #[derive(Error, Debug)]
+    #[error("failed to load configuration")]
+    pub struct LoadError {
+        // Named `source` → automatically used as Error::source()
+        pub source: std::io::Error,
+    }
+    ```
+
+    ```rust
+    let err = LoadError { source: std::io::Error::other("disk full") };
+    assert!(err.source().is_some());
+    ```
+  </Tab>
+  <Tab title="#[source] attribute">
+    Use `#[source]` when you want a different field name, or when the field name `source` is already used for something else (such as a human-readable field in an error message).
+
+    ```rust
+    use thiserror::Error;
+
+    #[derive(Error, Debug)]
+    #[error("{source_path} → {destination_path}: copy failed")]
+    pub struct CopyError {
+        pub source_path: String,       // a context field, not the error source
+        pub destination_path: String,
+        #[source]                      // this is the error source
+        pub io: std::io::Error,
+    }
+    ```
+
+    <Note>
+      If a field is named `source` but you do **not** want it treated as the error source — for example because it holds a `String` or `char` — `thiserror` respects its type: only fields whose type implements `std::error::Error` are considered implicit sources. The field name alone is not enough when the type is not an error.
+    </Note>
+  </Tab>
+  <Tab title="#[from] attribute">
+    `#[from]` combines two things at once: it generates a `From` implementation (enabling the `?` operator) **and** marks the field as the source. You never need `#[from]` and `#[source]` together on the same field.
+
+    ```rust
+    use thiserror::Error;
+
+    #[derive(Error, Debug)]
+    pub enum AppError {
+        #[error("I/O operation failed")]
+        Io(#[from] std::io::Error),       // From<io::Error> + source()
+
+        #[error("integer parse failed")]
+        Parse(#[from] std::num::ParseIntError),
+    }
+    ```
+
+    The field wrapped by `#[from]` becomes the `source()` of the variant automatically.
+  </Tab>
+</Tabs>
+
+## Ergonomic propagation with `?` and `#[from]`
+
+The `?` operator desugars to a `From` conversion followed by an early return. When your error type has `#[from]`-annotated variants, every distinct source error type can be converted automatically:
+
+```rust
+use std::fs;
+use std::num::ParseIntError;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum ReadCountError {
+    #[error("could not read file")]
+    Io(#[from] std::io::Error),
+
+    #[error("file contents are not a valid integer")]
+    Parse(#[from] ParseIntError),
+}
+
+/// Read an integer count from a file.
+pub fn read_count(path: &str) -> Result<u32, ReadCountError> {
+    let text = fs::read_to_string(path)?;      // io::Error → ReadCountError::Io
+    let count = text.trim().parse::<u32>()?;   // ParseIntError → ReadCountError::Parse
+    Ok(count)
+}
+```
+
+Each `?` converts and wraps the source error, preserving it as the `source()` of the resulting `ReadCountError` variant.
+
+## Walking the error chain at runtime
+
+You can print the full chain of causes by iterating `source()` in a loop. This is useful in application entry points, logging handlers, or test helpers:
+
+```rust
+fn print_error_chain(err: &dyn std::error::Error) {
+    eprintln!("Error: {}", err);
+    let mut source = err.source();
+    while let Some(cause) = source {
+        eprintln!("  Caused by: {}", cause);
+        source = cause.source();
+    }
+}
+```
+
+Given a multi-level error, this produces output like:
+
+```text
+Error: failed to start application
+  Caused by: could not read file
+  Caused by: No such file or directory (os error 2)
+```
+
+## Multi-level chaining example
+
+Here is a three-level chain: application error → library error → OS error.
+
+```rust
+use std::io;
+use std::path::PathBuf;
+use thiserror::Error;
+
+// --- Library layer ----------------------------------------------------------
+
+#[derive(Error, Debug)]
+#[error("failed to read {path}")]
+pub struct FileReadError {
+    pub path: PathBuf,
+    #[source]
+    pub source: io::Error,
+}
+
+// --- Application layer -------------------------------------------------------
+
+#[derive(Error, Debug)]
+pub enum StartupError {
+    #[error("could not load configuration")]
+    Config(#[from] FileReadError),
+
+    #[error("invalid command-line arguments: {0}")]
+    Args(String),
+}
+
+// --- Usage -------------------------------------------------------------------
+
+fn load_config(path: &str) -> Result<String, FileReadError> {
+    std::fs::read_to_string(path).map_err(|source| FileReadError {
+        path: PathBuf::from(path),
+        source,
+    })
+}
+
+fn start() -> Result<(), StartupError> {
+    let _config = load_config("/etc/myapp/config.toml")?; // FileReadError → StartupError::Config
+    Ok(())
+}
+
+fn main() {
+    if let Err(err) = start() {
+        print_error_chain(&err);
+        std::process::exit(1);
+    }
+}
+
+fn print_error_chain(err: &dyn std::error::Error) {
+    eprintln!("Error: {}", err);
+    let mut source = err.source();
+    while let Some(cause) = source {
+        eprintln!("  Caused by: {}", cause);
+        source = cause.source();
+    }
+}
+```
+
+When `/etc/myapp/config.toml` does not exist, the output is:
+
+```text
+Error: could not load configuration
+  Caused by: failed to read /etc/myapp/config.toml
+  Caused by: No such file or directory (os error 2)
+```
+
+## `Option<E>` as a source
+
+`thiserror` also accepts `Option<E>` as a source field. When the option is `Some`, the inner error is returned by `source()`; when it is `None`, `source()` returns `None`. This is useful for errors that may or may not have a root cause:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("request failed with status {status}")]
+pub struct RequestError {
+    pub status: u16,
+    #[source]
+    pub source: Option<std::io::Error>,
+}
+```
+
+`#[from]` also works with `Option<E>`, generating `From<Option<E>>`:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("...")]
+pub struct ErrorWithOptionalSource {
+    #[from]
+    source: Option<std::io::Error>,
+}
+```
+
+## Transparent errors and the source chain
+
+`#[error(transparent)]` makes the wrapping error invisible in the chain — it forwards both `Display` and `source()` to the inner error. This is useful for catch-all variants in enums or opaque public wrappers:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum PluginError {
+    #[error("plugin not found: {0}")]
+    NotFound(String),
+
+    /// Forwards any arbitrary plugin-provided error without wrapping it.
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+```
+
+When a caller walks the error chain of a `PluginError::Other(e)`, they see `e` directly — not a `PluginError` wrapper layer first.
+
+## Boxed source errors
+
+For maximum flexibility, a field's type can be a boxed trait object:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("generic failure: {message}")]
+pub struct GenericError {
+    pub message: String,
+    #[source]
+    pub source: Box<dyn std::error::Error + Send + Sync + 'static>,
+}
+```
+
+Any `Send + Sync + 'static` error can be stored as the source, and `Error::source()` returns a reference to it. `downcast_ref` can be used by callers who need to inspect the concrete type:
+
+```rust
+fn is_io_error(err: &GenericError) -> bool {
+    err.source()
+        .and_then(|s| s.downcast_ref::<std::io::Error>())
+        .is_some()
+}
+```
+
+## Compatibility with `anyhow`
+
+`thiserror` errors implement `std::error::Error` and are therefore fully compatible with `anyhow::Error`. Any `thiserror` error can be converted into `anyhow::Error` via `?` or `anyhow::Error::new(e)`, and `anyhow` will preserve the source chain:
+
+```rust
+use anyhow::Context;
+
+fn run() -> anyhow::Result<()> {
+    // thiserror error propagated into anyhow::Result
+    let count = read_count("/tmp/count.txt")
+        .context("application startup failed")?;
+    println!("count = {count}");
+    Ok(())
+}
+```
+
+<Tip>
+  The recommended pattern for larger projects is: use `thiserror` in library crates so callers can match on specific errors, and use `anyhow` in the application's `main` function (or integration tests) for easy propagation and rich context messages. See [thiserror vs anyhow](/guides/vs-anyhow) for a detailed comparison.
+</Tip>

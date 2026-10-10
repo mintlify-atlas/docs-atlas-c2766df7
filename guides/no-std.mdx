@@ -1,0 +1,202 @@
+---
+title: "Using thiserror in no_std Environments"
+sidebarTitle: "no_std Usage"
+description: "Learn how to use thiserror in no_std Rust projects by disabling the std feature, with working examples and Cargo.toml configuration."
+---
+
+`thiserror` is designed from the ground up to work in `no_std` environments. The crate itself is marked `#![no_std]`, and all derive functionality — `Display`, `Error`, `From`, and `source()` — works without the standard library. The only thing the `std` feature adds is a small formatting convenience for `Path` and `PathBuf` values. Everything else works identically in both `std` and `no_std` contexts.
+
+## What the `std` feature controls
+
+By default, `thiserror` enables a feature named `std`. This feature adds support for using `std::path::Path` and `std::path::PathBuf` directly in `#[error("...")]` format strings without calling `.display()`:
+
+```rust
+// Works automatically with `std` feature enabled (the default):
+#[derive(thiserror::Error, Debug)]
+#[error("failed to create configuration file {path}")]
+pub struct ConfigError {
+    pub path: std::path::PathBuf,
+    pub source: std::io::Error,
+}
+```
+
+Without the `std` feature, `PathBuf` does not implement `std::fmt::Display`, so this would not compile. The workaround is to call `.display()` explicitly in the format string, which works in both `std` and `no_std` configurations.
+
+<Note>
+  In a `no_std` context you generally will not have `std::path::PathBuf` anyway, since it requires the standard library's filesystem abstractions. This feature distinction matters primarily when you are writing code that is conditionally `no_std` but can also target `std` platforms.
+</Note>
+
+## Cargo.toml configuration
+
+<CodeGroup>
+
+```toml With std (default)
+[dependencies]
+thiserror = "2"
+```
+
+```toml Without std (no_std)
+[dependencies]
+thiserror = { version = "2", default-features = false }
+```
+
+</CodeGroup>
+
+Disabling `default-features` turns off the `std` feature. No other configuration is required — all derive macros, trait implementations, and attributes work exactly as they do with `std`.
+
+### Rust version requirement
+
+`thiserror` requires Rust **1.77** or newer. Check your `rust-version` in `Cargo.toml` if you are targeting embedded environments with older toolchains.
+
+## A complete `no_std` example
+
+The following is drawn directly from `thiserror`'s own test suite for `no_std` compatibility. It defines an enum error with a `#[from]` variant and a struct error with a named field, both in a `#![no_std]` crate:
+
+```rust
+#![no_std]
+
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("Error::E")]
+    E(#[from] SourceError),
+}
+
+#[derive(Error, Debug)]
+#[error("SourceError {field}")]
+pub struct SourceError {
+    pub field: i32,
+}
+```
+
+This compiles cleanly with `thiserror = { version = "2", default-features = false }`. The `#[from]` attribute generates a `From<SourceError> for Error` implementation, and `Error::source()` returns the `SourceError` as expected.
+
+### Testing without `std::io`
+
+The test suite for this code uses `core::fmt::Write` and a stack-allocated buffer instead of `std`'s I/O types, demonstrating that `Display` works entirely on `core`:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use crate::{Error, SourceError};
+    use core::error::Error as _;
+    use core::fmt::{self, Write};
+    use core::mem;
+
+    struct Buf<'a>(&'a mut [u8]);
+
+    impl Write for Buf<'_> {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            if s.len() <= self.0.len() {
+                let (out, rest) = mem::take(&mut self.0).split_at_mut(s.len());
+                out.copy_from_slice(s.as_bytes());
+                self.0 = rest;
+                Ok(())
+            } else {
+                Err(fmt::Error)
+            }
+        }
+    }
+
+    #[test]
+    fn test() {
+        let source = SourceError { field: -1 };
+        let error = Error::from(source);
+
+        // source() still works in no_std
+        let source = error
+            .source()
+            .unwrap()
+            .downcast_ref::<SourceError>()
+            .unwrap();
+
+        // Display works with core::fmt::Write
+        let mut msg = [b'~'; 17];
+        write!(Buf(&mut msg), "{error}").unwrap();
+        assert_eq!(msg, *b"Error::E~~~~~~~~~");
+
+        let mut msg = [b'~'; 17];
+        write!(Buf(&mut msg), "{source}").unwrap();
+        assert_eq!(msg, *b"SourceError -1~~~");
+    }
+}
+```
+
+All of `thiserror`'s generated trait implementations — `Display`, `From`, and `Error::source()` — are available with nothing more than `core`.
+
+## What works without `std`
+
+Every capability of `thiserror` is available in `no_std`:
+
+| Feature | Available without `std`? |
+|---|---|
+| `#[derive(Error)]` on enums | ✅ Yes |
+| `#[derive(Error)]` on structs | ✅ Yes |
+| `#[error("...")]` display messages | ✅ Yes |
+| `#[from]` — automatic `From` impl | ✅ Yes |
+| `#[source]` — `Error::source()` | ✅ Yes |
+| `#[error(transparent)]` | ✅ Yes |
+| Generics in error types | ✅ Yes |
+| `Path`/`PathBuf` direct in format strings | ❌ Requires `std` feature |
+
+## Using `alloc` alongside `no_std`
+
+If your crate targets embedded environments that provide a heap allocator but not the full standard library, you can use `extern crate alloc` alongside `thiserror`. Error messages that include `String` or `Vec` fields require `alloc`:
+
+```rust
+#![no_std]
+
+extern crate alloc;
+
+use alloc::string::String;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum NetworkError {
+    #[error("connection refused by {host}")]
+    Refused { host: String },
+
+    #[error("packet checksum mismatch")]
+    ChecksumError,
+}
+```
+
+`thiserror`'s derive macro does not add an implicit `extern crate alloc` — if your format strings or error fields use types from `alloc`, you must declare it yourself.
+
+## Setting up a `no_std` workspace
+
+Here is a minimal `Cargo.toml` for a `no_std` crate that uses `thiserror`:
+
+```toml
+[package]
+name = "my-embedded-lib"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+
+[dependencies]
+thiserror = { version = "2", default-features = false }
+```
+
+And the corresponding crate root:
+
+```rust
+#![no_std]
+
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum SensorError {
+    #[error("sensor not responding")]
+    Timeout,
+
+    #[error("calibration value {0} out of range [0, 4095]")]
+    OutOfRange(u16),
+
+    #[error("checksum mismatch: expected {expected:#04x}, got {actual:#04x}")]
+    ChecksumMismatch { expected: u8, actual: u8 },
+}
+```
+
+This is a fully self-contained `no_std` error type — no heap, no standard library, no runtime required.

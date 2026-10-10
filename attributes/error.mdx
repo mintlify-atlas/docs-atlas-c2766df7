@@ -1,0 +1,228 @@
+---
+title: "#[error(...)] — Custom Display Messages for Errors"
+sidebarTitle: "#[error]"
+description: "Use #[error(\"...\")] to generate a Display impl for your error type. Supports field interpolation, expression args, debug formatting, and custom format functions."
+---
+
+The `#[error("...")]` attribute is the primary way to attach a human-readable message to an error type defined with `#[derive(Error)]`. When present, thiserror generates a `std::fmt::Display` implementation using the provided format string. The attribute can be placed on the struct itself, or on each variant of an enum individually.
+
+## Basic usage
+
+Place `#[error("...")]` on a struct or enum variant with a static string to produce a fixed display message:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("something went wrong")]
+pub struct SimpleError;
+
+#[derive(Error, Debug)]
+pub enum AppError {
+    #[error("connection refused")]
+    ConnectionRefused,
+    #[error("timed out")]
+    Timeout,
+}
+```
+
+## Field interpolation shorthands
+
+The format string supports a concise shorthand for interpolating fields directly. Thiserror recognizes these patterns and expands them to the corresponding `write!` calls:
+
+| Shorthand | Expands to |
+|-----------|-----------|
+| `{var}` | `write!("{}", self.var)` |
+| `{0}` | `write!("{}", self.0)` |
+| `{var:?}` | `write!("{:?}", self.var)` |
+| `{0:?}` | `write!("{:?}", self.0)` |
+
+Named fields and tuple fields both work:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("braced error: {msg}")]
+pub struct BracedError {
+    msg: String,
+}
+
+#[derive(Error, Debug)]
+#[error("tuple error: {0}")]
+pub struct TupleError(usize);
+
+#[derive(Error, Debug)]
+pub enum ParseError {
+    #[error("invalid header (expected {expected:?}, found {found:?})")]
+    InvalidHeader {
+        expected: String,
+        found: String,
+    },
+    #[error("wrong case, first char was {0:?}")]
+    WrongCase(char),
+}
+```
+
+## Additional expression arguments
+
+Beyond direct field references, the format string can include arbitrary Rust expressions as named arguments. This is useful when you need a computed value in the message:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("invalid rdo_lookahead_frames {0} (expected < {max})", max = i32::MAX)]
+    InvalidLookahead(u32),
+}
+```
+
+When an expression argument needs to access a field of the error, prefix named fields with `.` and tuple fields with `.0`, `.1`, etc.:
+
+```rust
+use thiserror::Error;
+
+fn first_char(s: &String) -> char {
+    s.chars().next().unwrap_or('?')
+}
+
+#[derive(Debug)]
+pub struct Limits {
+    pub lo: usize,
+    pub hi: usize,
+}
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("first letter must be lowercase but was {:?}", first_char(.0))]
+    WrongCase(String),
+
+    #[error("invalid index {idx}, expected at least {} and at most {}", .limits.lo, .limits.hi)]
+    OutOfBounds { idx: usize, limits: Limits },
+}
+```
+
+<Note>
+The leading `.` in `.0` and `.var` tells thiserror that this expression refers to a field on `self`, not a local binding or free function. Without it, the expression is treated as a regular Rust expression evaluated in the enclosing scope.
+</Note>
+
+## Mixing fields and extra args
+
+Named field references and positional extra args can coexist in the same format string. Positional args come from the extra argument list, while named field shorthands like `{a}` pull from the struct's own fields:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("a={a} :: b={} :: c={c} :: d={d}", 1, c = 2, d = 3)]
+pub struct MixedError {
+    a: usize,
+    d: usize,
+}
+// Displays as: "a=0 :: b=1 :: c=2 :: d=3"
+```
+
+## Debug and other format specifiers
+
+All standard Rust format specifiers work inside the braces. The most common are `{var:?}` for debug output and `{field:p}` for pointer addresses:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("pointer address: {field:p}")]
+pub struct PtrError {
+    field: Box<i32>,
+}
+```
+
+## The `fmt = path` variant
+
+Instead of a format string, you can delegate formatting entirely to a function via `#[error(fmt = path)]`. The function receives each field as an argument (in declaration order), followed by a `&mut fmt::Formatter`, and must return `fmt::Result`.
+
+```rust
+use core::fmt;
+use thiserror::Error;
+
+fn pair(k: &i32, v: &i32, formatter: &mut fmt::Formatter) -> fmt::Result {
+    write!(formatter, "pair={k}:{v}")
+}
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error(fmt = pair)]
+    Tuple(i32, i32),
+
+    #[error(fmt = pair)]
+    Entry { k: i32, v: i32 },
+}
+```
+
+For an enum, `#[error(fmt = path)]` can also appear at the top level as a default for all variants that do not have their own display attribute:
+
+```rust
+use core::fmt;
+use thiserror::Error;
+
+mod util {
+    use core::fmt::Octal;
+    pub fn octal<T: Octal>(value: &T, formatter: &mut fmt::Formatter) -> fmt::Result {
+        write!(formatter, "0o{:o}", value)
+    }
+}
+
+#[derive(Error, Debug)]
+#[error(fmt = util::octal)]   // default for variants without their own #[error]
+pub enum OctalError {
+    Short(i16),
+    Long { n: i32 },
+
+    #[error("raw: {0}")]      // this variant overrides the default
+    Raw(i32),
+}
+```
+
+<Note>
+`#[error(fmt = ...)]` is only supported on enums. For a struct, write your own `Display` implementation by hand.
+</Note>
+
+## Enum-level default messages
+
+An `#[error("...")]` placed on an enum itself acts as a *default* for every variant that does not specify its own message. Each variant inherits the format string and resolves field references against its own fields:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("{0}")]
+pub enum Error {
+    Some(&'static str),       // uses the default: displays the inner string
+    #[error("other error")]   // overrides the default
+    Other(&'static str),
+}
+```
+
+## Escaping braces
+
+To include a literal `{` or `}` in the message, double them just like in any Rust format string:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("fn main() {{}}")]
+pub struct CodeError;
+// Displays as: "fn main() {}"
+```
+
+## Constraints
+
+<Warning>
+Only one `#[error("...")]` attribute is allowed per type or variant. Placing two on the same item is a compile error: `only one #[error(...)] attribute is allowed`.
+</Warning>
+
+- `#[error("...")]` and `#[error(transparent)]` are mutually exclusive on the same item.
+- `#[error(fmt = ...)]` and a regular format-string `#[error("...")]` cannot both appear on the same item.
+- The `#[error(...)]` attribute must be on the struct or enum variant, never on a field; placing it on a field is a compile error.
+- If *any* variant in an enum has a display attribute, *all* variants must have one (either their own or an inherited default on the enum).
