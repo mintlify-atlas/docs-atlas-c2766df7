@@ -1,5 +1,5 @@
 ---
-title: "Error Chaining and Propagation with thiserror"
+title: "Error Chaining and Source Propagation with thiserror"
 sidebarTitle: "Error Chaining"
 description: "Learn how to chain errors, expose root causes via source(), and propagate failures ergonomically with the ? operator using thiserror."
 ---
@@ -57,7 +57,7 @@ When an error wraps another error, it returns that inner error from `source()`. 
     ```
 
     <Note>
-      If a field is named `source` but you do **not** want it treated as the error source — for example because it holds a `String` or `char` — `thiserror` respects its type: only fields whose type implements `std::error::Error` are considered implicit sources. The field name alone is not enough when the type is not an error.
+      If a field is named `source` but its type does not implement `std::error::Error`, the derive macro will produce a compile error. To avoid this, either rename the field or use a type that implements `Error`. The `source` field name is always treated as the designated error source by `thiserror`.
     </Note>
   </Tab>
   <Tab title="#[from] attribute">

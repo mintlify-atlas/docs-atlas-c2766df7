@@ -1,5 +1,5 @@
 ---
-title: "Defining Enum Error Types with thiserror"
+title: "Defining Enum Error Types with thiserror derive(Error)"
 sidebarTitle: "Enum Errors"
 description: "Learn how to define idiomatic Rust enum error types using derive(Error), covering every variant shape, #[from] conversions, and generics."
 ---
@@ -197,10 +197,7 @@ use thiserror::Error;
 
 /// An error that carries a generic inner error type.
 #[derive(Error, Debug)]
-pub enum EnumFromGeneric<E>
-where
-    E: std::error::Error + 'static,
-{
+pub enum EnumFromGeneric<E> {
     #[error("operation failed: {0}")]
     Source(#[from] E),
 }

@@ -44,7 +44,7 @@ Every shape supports the full set of thiserror attributes — there is no featur
 
 ## Attributes at a glance
 
-thiserror exposes four attributes that control code generation. All of them are compile-time only.
+thiserror exposes attributes that control code generation. All of them are compile-time only.
 
 ### `#[error("...")]`
 
@@ -79,6 +79,28 @@ You can also pass arbitrary format expressions by prefixing field references wit
 pub enum Error {
     #[error("invalid index {idx}, expected between {} and {}", .limits.lo, .limits.hi)]
     OutOfBounds { idx: usize, limits: Limits },
+}
+```
+
+### `#[error(fmt = path)]`
+
+Instead of a format string, you can supply a function path as the `fmt` argument. thiserror calls that function to format the variant, passing the variant's fields as arguments followed by a `&mut Formatter`. This is only supported on enum variants (not structs). When placed on the enum itself, the `fmt` function applies to every variant that does not have its own `#[error(...)]` override.
+
+```rust
+use std::fmt;
+use thiserror::Error;
+
+fn octal<T: fmt::Octal>(val: &T, f: &mut fmt::Formatter) -> fmt::Result {
+    write!(f, "0o{:o}", val)
+}
+
+#[derive(Error, Debug)]
+pub enum ParseError {
+    #[error(fmt = octal)]
+    BadByte(u8),
+
+    #[error("unexpected end of input")]
+    UnexpectedEof,
 }
 ```
 
@@ -125,7 +147,7 @@ pub struct MyError {
 ```
 
 <Note>
-  `Backtrace` support requires a nightly compiler (Rust 1.73+) because it uses the unstable `error_generic_member_access` feature. On stable Rust the field is compiled in but `provide()` is not generated.
+  `Backtrace` support requires a nightly compiler (Rust 1.73+) because it relies on the unstable `error_generic_member_access` feature. On a stable compiler, the `Backtrace` field is still accepted but `provide()` is not generated.
 </Note>
 
 ### `#[error(transparent)]`

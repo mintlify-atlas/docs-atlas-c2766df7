@@ -1,7 +1,7 @@
 ---
 title: "#[error(...)] — Custom Display Messages for Errors"
 sidebarTitle: "#[error]"
-description: "Use #[error(\"...\")] to generate a Display impl for your error type. Supports field interpolation, expression args, debug formatting, and custom format functions."
+description: "Use #[error(\"...\")] to generate a Display impl for your error type. Supports field interpolation, expression arguments, debug formatting, and fmt = path."
 ---
 
 The `#[error("...")]` attribute is the primary way to attach a human-readable message to an error type defined with `#[derive(Error)]`. When present, thiserror generates a `std::fmt::Display` implementation using the provided format string. The attribute can be placed on the struct itself, or on each variant of an enum individually.

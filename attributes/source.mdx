@@ -1,5 +1,5 @@
 ---
-title: "#[source] — Linking Error Causes with source()"
+title: "#[source] — Expose the Underlying Error Cause via source()"
 sidebarTitle: "#[source]"
 description: "Mark a field with #[source] (or name it 'source') to implement Error::source(), exposing the underlying cause of an error for inspection and display."
 ---
@@ -114,7 +114,7 @@ This is useful when you have an error that may or may not have an underlying cau
 
 The type of a `#[source]` field may not contain non-static lifetimes, because `Error::source()` is defined to return `&(dyn Error + 'static)`. Thiserror enforces this at compile time:
 
-```
+```text
 non-static lifetimes are not allowed in the source of an error,
 because std::error::Error requires the source is dyn Error + 'static
 ```
@@ -167,7 +167,7 @@ For the `Unknown` variant, `source()` returns `None`. For the others, it returns
 
 Each variant or struct may designate at most one field as the source. Placing `#[source]` on two different fields within the same variant is a compile error:
 
-```
+```text
 duplicate #[source] attribute
 ```
 

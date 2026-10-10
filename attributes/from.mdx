@@ -90,7 +90,7 @@ pub struct TupleIoError(#[from] io::Error);
 
 ## `#[from]` always implies `#[source]`
 
-A field annotated with `#[from]` is automatically treated as the `#[source]` field. You never need both attributes on the same field; adding both is redundant and will be flagged as an error by the compiler. The `Error::source()` method is generated based on the same field.
+A field annotated with `#[from]` is automatically treated as the `#[source]` field. You never need both attributes on the same field; adding `#[source]` alongside `#[from]` on the same field is redundant but harmless. The `Error::source()` method is generated based on the same field. Note that placing `#[source]` on a *different* field than `#[from]` within the same variant is a compile error.
 
 <Tip>
 Because `#[from]` implies `#[source]`, consumers of your error can always call `.source()` to retrieve the original inner error, regardless of whether they used the `From` conversion or constructed the variant directly.
@@ -105,7 +105,7 @@ A variant or struct using `#[from]` may only contain two kinds of fields:
 
 Any additional field causes a compile error:
 
-```
+```text
 deriving From requires no fields other than source and backtrace
 ```
 
@@ -140,7 +140,7 @@ Each variant or struct may have at most one `#[from]` field. Placing `#[from]` o
 
 Similarly, `#[from]` must go on a specific field, not on the struct or enum item itself — the placement on the item level is a compile error:
 
-```
+```text
 not expected here; the #[from] attribute belongs on a specific field
 ```
 
@@ -148,7 +148,7 @@ not expected here; the #[from] attribute belongs on a specific field
 
 The type of a `#[from]`-annotated field must not contain non-static lifetimes. This is because `std::error::Error` requires `source()` to return `dyn Error + 'static`:
 
-```
+```text
 non-static lifetimes are not allowed in the source of an error,
 because std::error::Error requires the source is dyn Error + 'static
 ```

@@ -1,10 +1,10 @@
 ---
 title: "#[backtrace] — Capturing Backtraces in Error Types"
 sidebarTitle: "#[backtrace]"
-description: "Embed a std::backtrace::Backtrace in your error type for automatic capture, or use #[backtrace] to forward provide() through a source for shared backtraces."
+description: "Embed a std::backtrace::Backtrace in your error type for automatic capture, or use #[backtrace] to forward provide() to a source for shared backtraces."
 ---
 
-Thiserror supports two distinct but related mechanisms for incorporating backtraces into error types. The first is *automatic detection*: any field whose type is named `Backtrace` (specifically `std::backtrace::Backtrace`) is automatically wired into `Error::provide()`, with no attribute required. The second is the explicit `#[backtrace]` attribute, which is used when a field is both a source error and a backtrace provider, allowing both layers to share the same captured backtrace.
+Thiserror supports two distinct but related mechanisms for incorporating backtraces into error types. The first is *automatic detection*: any field whose type is named `Backtrace` (specifically `std::backtrace::Backtrace`) is automatically wired into `Error::provide()`, with no attribute required. The second is the explicit `#[backtrace]` attribute, which can mark a backtrace field explicitly or forward `provide()` through a source field so both error layers share the same backtrace.
 
 <Warning>
 Backtrace support requires a **nightly Rust compiler** with Rust version 1.73 or newer, because it relies on the `error_generic_member_access` feature. On stable Rust, `Backtrace` fields are compiled in but the `provide()` method is not generated.
@@ -48,7 +48,11 @@ pub enum AppError {
 
 ## The explicit `#[backtrace]` attribute
 
-The `#[backtrace]` attribute has a specific, narrower purpose: it marks a field that is **both** a source error **and** a backtrace carrier. When placed on a source field, thiserror forwards `Error::provide()` to that source's own `provide()`, so that both the inner and outer error respond to `Backtrace` requests with the same underlying backtrace:
+The `#[backtrace]` attribute serves two purposes depending on where it is placed:
+
+1. **On a plain `Backtrace` field** — explicitly marks it as the backtrace field. This is equivalent to auto-detection by type name, but makes the intent clear and works even if the type is not literally named `Backtrace` at the last path segment.
+
+2. **On a source error field** — forwards `Error::provide()` to that source's own `provide()`, so that both the inner and outer error respond to `Backtrace` requests with the same underlying backtrace. This avoids capturing a redundant second backtrace at the outer level.
 
 ```rust
 use std::io;
@@ -170,7 +174,7 @@ fn print_backtrace(err: &dyn error::Error) {
 
 Placing `#[backtrace]` on more than one field in the same variant or struct is a compile error:
 
-```
+```text
 duplicate #[backtrace] attribute
 ```
 

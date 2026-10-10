@@ -73,25 +73,26 @@ Consumers of the crate interact only with `PublicError`. The `Display` output an
 
 `#[error(transparent)]` requires the type or variant to have **exactly one field**. Placing it on a type or variant with zero or more than one field is a compile error:
 
-```
+```text
 #[error(transparent)] requires exactly one field
 ```
 
 The field can be named or unnamed:
 
 ```rust
+use std::io;
 use thiserror::Error;
 
 // Tuple struct — one unnamed field
 #[derive(Error, Debug)]
 #[error(transparent)]
-pub struct Wrapper(SomeInnerError);
+pub struct Wrapper(io::Error);
 
 // Named struct — one named field
 #[derive(Error, Debug)]
 #[error(transparent)]
 pub struct NamedWrapper {
-    inner: SomeInnerError,
+    inner: io::Error,
 }
 ```
 
@@ -99,7 +100,7 @@ pub struct NamedWrapper {
 
 A transparent error struct or variant may not also contain a `#[source]` attribute. Since `source()` is already forwarded to the inner field, adding an explicit `#[source]` would be contradictory:
 
-```
+```text
 transparent error struct can't contain #[source]
 transparent variant can't contain #[source]
 ```
@@ -125,13 +126,13 @@ pub enum Error<E> {
 
 `#[error(transparent)]` and `#[error("...")]` cannot both appear on the same item:
 
-```
+```text
 cannot have both #[error(transparent)] and a display attribute
 ```
 
 Similarly, `#[error(transparent)]` and `#[error(fmt = ...)]` are mutually exclusive:
 
-```
+```text
 cannot have both #[error(transparent)] and #[error(fmt = ...)]
 ```
 
